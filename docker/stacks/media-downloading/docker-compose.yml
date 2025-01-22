@@ -1,0 +1,217 @@
+services:
+  gluetun:
+    image: qmcgaw/gluetun:latest
+    container_name: gluetun
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+    ports:
+      # torrent ports
+      - "6881:6881"
+      - "6881:6881/udp"
+      # web-ui ports
+      - "8112:8112"
+      # daemon port
+      - "58846:58846"
+    environment:
+      - VPN_SERVICE_PROVIDER=protonvpn
+      - VPN_TYPE=wireguard
+      - VPN_PORT_FORWARDING_PROVIDER=protonvpn
+      - PORT_FORWARD_ONLY=on
+      # From [Interface] section of your WireGuard config:
+      - WIREGUARD_PRIVATE_KEY=${WIREGUARD_PRIVATE_KEY}
+      - WIREGUARD_ADDRESSES=${WIREGUARD_ADDRESSES} # e.g. 10.2.0.2/32
+      # From [Peer] section:
+      - WIREGUARD_PEERS_PUBLIC_KEY=${WIREGUARD_PEERS_PUBLIC_KEY}
+      - WIREGUARD_PEERS_ALLOWED_IPS=${WIREGUARD_PEERS_ALLOWED_IPS} # e.g. 0.0.0.0/0,::/0
+      - WIREGUARD_PEERS_ENDPOINT=${WIREGUARD_PEERS_ENDPOINT}       # e.g. server.xx.protonvpn.net:51820
+      - PROTONVPN_TIER=plus
+      - TZ=${TZ:-America/New_York}
+    volumes:
+      - gluetun-data:/gluetun
+    labels:
+      - "com.centurylinklabs.watchtower.scope=media-mgmt"
+      - "com.centurylinklabs.watchtower.enable=false"
+  deluge:
+    image: lscr.io/linuxserver/deluge:latest
+    container_name: deluge-serve
+    restart: unless-stopped
+    network_mode: service:gluetun
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=${TZ:-America/New_York}
+    volumes:
+      - deluge-config:/config
+      - Media-Downloads:/downloads
+    labels:
+      - "com.centurylinklabs.watchtower.scope=media-mgmt"
+      - "com.centurylinklabs.watchtower.enable=false"
+
+  qbittorrent:
+    container_name: qbitt-serve
+    image: ghcr.io/hotio/qbittorrent:latest
+    restart: unless-stopped
+    ports:
+      - "${QBITT_PORT:-8114}:8080"
+    networks:
+      - i2p-net
+      - indexer-backend-net
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - UMASK=002
+      - TZ=${TIME_ZONE:-America/New_York}
+      - WEBUI_PORTS=8080/tcp,8080/udp
+      # # ProtonVPN env settings (hotio.dev)
+      - VPN_ENABLED=true
+      - VPN_CONF=wg0
+      - VPN_PROVIDER=proton
+      - VPN_LAN_NETWORK=${PROTONVPN_ADDRESSES:-10.0.0.0/24}
+      - VPN_LAN_LEAK_ENABLED=false
+      - VPN_EXPOSE_PORTS_ON_LAN="${QBITT_PORT:-8114}/udp"
+      - VPN_AUTO_PORT_FORWARD=true
+      - VPN_AUTO_PORT_FORWARD_TO_PORTS=32400/tcp
+      - VPN_KEEP_LOCAL_DNS=true
+      - VPN_FIREWALL_TYPE=legacy
+      - VPN_HEALTHCHECK_ENABLED=true
+    volumes:
+      - qbittorrent-config:/config
+      - Media-Downloads:/downloads
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      - net.ipv4.conf.all.src_valid_mark=1
+      - net.ipv6.conf.all.disable_ipv6=1
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    labels:
+      - "com.centurylinklabs.watchtower.scope=media-mgmt"
+      - "com.centurylinklabs.watchtower.enable=false"
+  i2pd:
+    image: geti2p/i2pd:latest
+    container_name: i2pd
+    restart: unless-stopped
+    # Optional environment variables (depending on i2pd image)
+    environment:
+      - PUID=1000
+      - PGID=1000
+    volumes:
+      - i2p-data:/var/lib/i2pd       # Persist I2P data/config
+    # Expose typical I2P ports (adjust as desired)
+    ports:
+      - "4447:4447"   # HTTP proxy or I2P web console (if enabled)
+      - "7656:7656"   # SAM API port (important for qBittorrent)
+    networks:
+      - i2p-net
+    labels:
+      - "com.centurylinklabs.watchtower.scope=media-mgmt"
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  jackett:
+    image: lscr.io/linuxserver/jackett:latest
+    container_name: jackett-serve
+    restart: unless-stopped
+    volumes:
+      - jackett-config:/config
+    ports:
+      - 9117:9117
+    networks:
+      - indexer-backend-net
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=${TIME_ZONE:-America/New_York}
+      - AUTO_UPDATE=true
+    labels:
+      - "com.centurylinklabs.watchtower.scope=media-mgmt"
+      - "com.centurylinklabs.watchtower.enable=true"
+  prowlarr:
+    container_name: prowlarr-serve
+    image: hotio/prowlarr:latest
+    restart: unless-stopped
+    ports:
+      - "9696:9696"
+    networks:
+      - indexer-backend-net
+      - i2p-net
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - UMASK=000
+      - TZ=${TZ:-America/New_York}
+    volumes:
+      - prowlarr-config:/config
+    labels:
+      - "com.centurylinklabs.watchtower.scope=media-mgmt"
+      - "com.centurylinklabs.watchtower.enable=true"
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: indexer-flaresolverr
+    restart: unless-stopped
+    ports:
+      - "${SOLVERR_PORT:-8191}:8191"
+    networks:
+      indexer-backend-net:
+        aliases:
+          - jackett-flaresolverr
+    environment:
+      - LOG_LEVEL=${SOLVERR_LOG_LEVEL:-error}
+      - LOG_HTML=${SOLVERR_LOG_HTML:-false}
+      - CAPTCHA_SOLVER=${SOLVERR_CAPTCHA_SOLVER:-none}
+      - TZ=${TIME_ZONE:-America/New_York}
+    labels:
+      - "com.centurylinklabs.watchtower.scope=media-mgmt"
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  watchtower:
+    container_name: media-watchtower
+    image: containrrr/watchtower:latest
+    restart: unless-stopped
+    environment:
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_POLL_INTERVAL=86400 # Default: 86400 (24hrs)
+      - WATCHTOWER_INCLUDE_STOPPED=false
+      - WATCHTOWER_SCOPE="media-mgmt"
+      - WATCHTOWER_LABEL_ENABLE=true  # Only update labeled containers
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  deluge-config:
+    external: true
+  downloads-data:
+    external: true
+  Media-Downloads:
+    external: true
+  jackett-config:
+    external: true
+  prowlarr-config:
+    external: true
+  ## local volumes for when NFS mounting is being unreliable:
+  # deluge-config_local:
+  #   external: true
+  #   name: deluge-config
+  # qbittorrent-config_local:
+  #   external: true
+  #   name: qbittorrent-config
+  # jackett-config_local:
+  #   external: true
+  #   name: jackett-config
+  # prowlarr-config_local:
+  #   external: true
+  #   name: prowlarr-config
+  ## non-external volumes:
+  gluetun-data:
+  i2p-data:
+
+networks:
+  indexer-backend-net:
+    driver: bridge
+  i2p-net:
+    external: true
